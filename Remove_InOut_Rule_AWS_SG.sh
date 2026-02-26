@@ -1,63 +1,73 @@
 #!/bin/bash
+# Run this script right after creating a new AWS account
+set -euo pipefail
 
-# Get a list of all active AWS regions
-regions=$(aws ec2 describe-regions --query "Regions[].RegionName" --output text)
+DRY_RUN=true   # set to false to apply changes
+LOG_FILE="sg_cleanup_$(date +%F).log"
 
-# Loop through each region
+log() {
+    echo "$(date '+%F %T') | $1" | tee -a "$LOG_FILE"
+}
+
+run_cmd() {
+    if [ "$DRY_RUN" = true ]; then
+        log "[DRY-RUN] $*"
+    else
+        log "[EXEC] $*"
+        eval "$@"
+    fi
+}
+
+log "Starting default security group cleanup..."
+
+regions=$(aws ec2 describe-regions \
+    --query "Regions[].RegionName" \
+    --output text)
+
 for region in $regions; do
-    echo "Checking region: $region"
-    
-    # Get the default security group ID for each VPC in the region
+    log "Checking region: $region"
+
     default_sg_ids=$(aws ec2 describe-security-groups \
         --region "$region" \
         --filters Name=group-name,Values=default \
         --query "SecurityGroups[].GroupId" \
         --output text)
-    
-    # Loop through each default security group
+
     for sg_id in $default_sg_ids; do
-        echo "Processing security group: $sg_id in region: $region"
-        
-        # Remove all inbound rules
+        log "Processing SG: $sg_id (region: $region)"
+
+        # Get inbound rules
         inbound_rules=$(aws ec2 describe-security-groups \
             --region "$region" \
             --group-ids "$sg_id" \
-            --query "SecurityGroups[].IpPermissions" \
+            --query "SecurityGroups[0].IpPermissions" \
             --output json)
-        
-        # Check if there are any inbound rules
+
         if [ "$inbound_rules" != "[]" ]; then
-            for rule in $(echo "$inbound_rules" | jq -c '.[]'); do
-                aws ec2 revoke-security-group-ingress \
-                    --region "$region" \
-                    --group-id "$sg_id" \
-                    --ip-permissions "$rule"
-                echo "Removed an inbound rule for security group: $sg_id"
-            done
+            run_cmd "aws ec2 revoke-security-group-ingress \
+                --region $region \
+                --group-id $sg_id \
+                --ip-permissions '$inbound_rules'"
         else
-            echo "No inbound rules to remove for security group: $sg_id"
+            log "No inbound rules for $sg_id"
         fi
-        
-        # Remove all outbound rules
+
+        # Get outbound rules
         outbound_rules=$(aws ec2 describe-security-groups \
             --region "$region" \
             --group-ids "$sg_id" \
-            --query "SecurityGroups[].IpPermissionsEgress" \
+            --query "SecurityGroups[0].IpPermissionsEgress" \
             --output json)
-        
-        # Check if there are any outbound rules
+
         if [ "$outbound_rules" != "[]" ]; then
-            for rule in $(echo "$outbound_rules" | jq -c '.[]'); do
-                aws ec2 revoke-security-group-egress \
-                    --region "$region" \
-                    --group-id "$sg_id" \
-                    --ip-permissions "$rule"
-                echo "Removed an outbound rule for security group: $sg_id"
-            done
+            run_cmd "aws ec2 revoke-security-group-egress \
+                --region $region \
+                --group-id $sg_id \
+                --ip-permissions '$outbound_rules'"
         else
-            echo "No outbound rules to remove for security group: $sg_id"
+            log "No outbound rules for $sg_id"
         fi
     done
 done
 
-echo "Script completed."
+log "Completed."
